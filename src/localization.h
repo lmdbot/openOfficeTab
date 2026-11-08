@@ -12,6 +12,11 @@ inline int resolve(int mode,LANGID system=GetUserDefaultUILanguage()){
 }
 struct Entry {const wchar_t* zh;const wchar_t* en;};
 inline constexpr Entry entries[]={
+    {L"移动标签",L"Move tab"},
+    {L"锁定标签",L"Lock tab"},
+    {L"关闭当前标签",L"Close current tab"},
+    {L"批量关闭",L"Close multiple tabs"},
+    {L"更多操作",L"More actions"},
     {L"重命名文件…",L"Rename file…"},
     {L"重命名文件",L"Rename file"},
     {L"新文件名",L"New file name"},
@@ -32,6 +37,7 @@ inline constexpr Entry entries[]={
     {L"请输入 6 位十六进制颜色，例如 #F0F0F0。",L"Enter a six-digit hexadecimal color, such as #F0F0F0."},
     {L"标签宽度",L"Tab width"},
     {L"标签宽度（80–360，按缩放自动适配）",L"Tab width (80–360; scales with DPI)"},
+    {L"默认宽度",L"Default width"},{L"宽度模式",L"Width mode"},
     {L"固定宽度",L"Fixed width"},
     {L"按标题长度（上述宽度为上限）",L"Fit title (up to the width above)"},
     {L"空间不足时压缩（上述宽度为上限）",L"Shrink to fit (up to the width above)"},
@@ -98,7 +104,8 @@ inline constexpr Entry entries[]={
     {L"openOfficeTab 标签栏",L"openOfficeTab tab bar"},
     {L"关闭文档窗口",L"Close document window"},
     {L"此窗口所在的标签组有 ",L"This tab group contains "},{L" 个文档。",L" documents."},
-    {L"关闭当前文档，还是关闭本组全部文档？\n未保存的更改仍由 Office 询问；取消保存会停止后续关闭。",L"Close this document or the whole group?\nOffice will ask to save changes. Cancel stops remaining closes."},
+    {L"关闭当前文档，还是关闭本组全部文档？",L"Close this document or the whole group?"},
+    {L"未保存的更改仍由 Office 询问；取消保存会停止后续关闭。",L"Office will ask to save changes. Cancel stops remaining closes."},
     {L"记住我的选择（可在标签设置中更改）",L"Remember my choice (change it in Tab settings)"},
     {L"关闭当前",L"Close current"},{L"关闭本组全部",L"Close group"},
     {L"新建文档",L"New document"},{L"打开文档",L"Open document"},

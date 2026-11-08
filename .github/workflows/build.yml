@@ -1,4 +1,4 @@
-name: Build
+name: Build Windows Release
 on:
   push:
   pull_request:
@@ -48,5 +48,9 @@ jobs:
         run: ./tests/desktop-package-test.ps1
       - uses: actions/upload-artifact@v4
         with:
-          name: openOfficetab-win-x64
-          path: delivery/*
+          name: openOfficetab-fork-release-win-x64
+          if-no-files-found: error
+          path: |
+            delivery/*-setup-x64.exe
+            delivery/*-win-x64.zip
+            delivery/SHA256SUMS.txt
