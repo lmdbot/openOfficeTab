@@ -106,12 +106,14 @@ void checkTabMenu() {
         tabmenu::Menu menu(owner, Host::Word, false, 2);
         tabmenu::populate(menu, view, 2);
         HMENU root = menu.handle();
-        assert(GetMenuItemCount(root) == 12);
+        assert(GetMenuItemCount(root) == 13);
+        assert(GetMenuItemID(root, 2) == 20);
+        assert(GetMenuState(root, 20, MF_BYCOMMAND) & MF_DISABLED);
         assert(GetMenuState(root, 2, MF_BYCOMMAND) & MF_DISABLED);
         assert(GetMenuState(root, 5, MF_BYCOMMAND) & MF_DISABLED);
         assert(GetMenuState(root, 10, MF_BYCOMMAND) & MF_CHECKED);
         assert(!(GetMenuState(root, 11, MF_BYCOMMAND) & MF_DISABLED));
-        HMENU move = GetSubMenu(root, 5), close = GetSubMenu(root, 9), more = GetSubMenu(root, 11);
+        HMENU move = GetSubMenu(root, 6), close = GetSubMenu(root, 10), more = GetSubMenu(root, 12);
         assert(move && close && more);
         assert(GetMenuItemCount(move) == 3 && GetMenuItemCount(close) == 4 && GetMenuItemCount(more) == 5);
         assert(GetMenuItemID(move, 0) == 13 && GetMenuItemID(move, 2) == 15);

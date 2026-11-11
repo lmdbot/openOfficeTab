@@ -5,6 +5,7 @@
 namespace renameui {
 struct RenameChoice {
     Session* session;unsigned long long id;std::wstring path;int language;
+    std::wstring name{};
     dialogui::Theme theme{};
 };
 inline void layout(HWND dialog, RenameChoice& choice) {
@@ -33,7 +34,7 @@ inline INT_PTR CALLBACK renameProc(HWND dialog,UINT message,WPARAM wp,LPARAM lp)
         auto edit=control(L"EDIT",documentrename::stem(choice->path).c_str(),WS_TABSTOP|ES_AUTOHSCROLL,101);
         SendMessageW(edit,EM_SETLIMITTEXT,255,0);SetWindowSubclass(edit,dialogui::controlProc,1,0);
         control(L"STATIC",documentrename::extension(choice->path).c_str(),SS_RIGHT|SS_ENDELLIPSIS|SS_NOPREFIX,113);
-        control(L"STATIC",i18n::text(choice->language,L"保留原目录和扩展名；当前编辑会一并保存。"),SS_NOPREFIX,114);
+        control(L"STATIC",i18n::text(choice->language,L"保存当前编辑，再关闭文档并用新名称重新打开。Office 撤销历史将重置。"),SS_NOPREFIX,114);
         for(int id:{IDCANCEL,IDOK}){auto button=control(L"BUTTON",i18n::text(choice->language,id==IDOK?L"重命名":L"取消"),WS_TABSTOP|BS_OWNERDRAW,id);SetWindowSubclass(button,dialogui::controlProc,1,0);}
         layout(dialog,*choice);
         choice->theme.center(dialog, 480, 288);
@@ -67,9 +68,7 @@ inline INT_PTR CALLBACK renameProc(HWND dialog,UINT message,WPARAM wp,LPARAM lp)
         if(!documentrename::validStem(name,documentrename::extension(choice->path))){alert(L"文件名无效。请勿使用保留名称、路径字符或末尾的空格和句点。");return TRUE;}
         auto view=choice->session->find(choice->id);
         if(!view||view->path!=choice->path){alert(L"文档路径已改变，请关闭对话框后重试。");return TRUE;}
-        EnableWindow(dialog,FALSE);auto result=choice->session->renameFile(choice->id,name);EnableWindow(dialog,TRUE);
-        if(result==documentrename::Result::failed){alert(L"未完成重命名，原文件未被删除。请检查同名文件、只读状态或 Office 提示；仅修改大小写暂不支持。");return TRUE;}
-        if(result==documentrename::Result::originalRetained)alert(L"文档已保存为新名称，但旧文件无法安全删除，已保留两份文件。请检查旧文件后手动处理。");
+        choice->name=name;
         EndDialog(dialog,IDOK);return TRUE;
     }
     if(message==WM_CLOSE||(message==WM_COMMAND&&LOWORD(wp)==IDCANCEL)){EndDialog(dialog,IDCANCEL);return TRUE;}

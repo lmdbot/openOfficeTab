@@ -2,7 +2,7 @@
 #include <string>
 #include <climits>
 
-// Pure filename policy and save/verify/remove ordering, testable without Office.
+// Filename policy shared by the rename dialog and the session.
 namespace documentrename {
 inline std::wstring leaf(const std::wstring& path){return path.substr(path.find_last_of(L"\\/")+1);}
 inline std::wstring extension(const std::wstring& path){
@@ -32,11 +32,5 @@ inline bool validStem(const std::wstring& name,const std::wstring& suffix){
 inline std::wstring target(const std::wstring& path,const std::wstring& name){
     auto slash=path.find_last_of(L"\\/");return slash==std::wstring::npos?L"":path.substr(0,slash+1)+name+extension(path);
 }
-enum class Result {failed,renamed,originalRetained};
-template<class Save,class Verify,class Remove>
-Result perform(Save&& save,Verify&& verify,Remove&& remove){
-    // A canceled, rejected or unverifiable save must never delete the original.
-    if(!save()||!verify())return Result::failed;
-    return remove()?Result::renamed:Result::originalRetained;
-}
+enum class Result {failed,renamed,reopenFailed};
 }
