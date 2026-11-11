@@ -1,0 +1,249 @@
+diff --git a/docs/rename-validation.md b/docs/rename-validation.md
+index 3ba2003..fe44835 100644
+--- a/docs/rename-validation.md
++++ b/docs/rename-validation.md
+@@ -29,6 +29,10 @@
+ 
+ ## 验证记录与边界
+ 
++检视修订补充了 PowerPoint 宏演示文稿、模板和放映的格式参数，以及窗口激活期间创建同名目标的回归用例。这些是模拟 COM 测试。PowerPoint 按扩展名选择保存格式，共用 .pptx 扩展名的普通与 Strict Open XML 演示文稿仍需区分。激活后的二次检查仍与 Office 实际写入分开，保存期间创建目标的情形仍待解决。
++
++本次修订缺少真实 32 位和 64 位 Word、Excel、PowerPoint 的验收结果。验收记录需要关联测试提交、程序版本、DLL/EXE SHA-256、Office 构建号和位数，并附实际操作及退出 Office 后核对文件内容的证据。下方是初版提交的历史记录。
++
+ Windows x64 开发机使用 Visual Studio C++ Build Tools 编译 x64 / x86 原生 DLL。两种架构各 10 项原生测试均通过，双架构 DLL 的加载、五个导出与 COM ABI 验证通过；本地化和公开示例检查通过。`tests/rename-test.cpp` 和 `tests/rename-session-test.cpp` 在两种架构均通过；后者使用模拟 Office COM 和真实临时文件，不能替代三款 Office 的完整人工验收。
+ 
+ 本地安装后，使用者已实际验证重命名功能及新版弹窗可用；未记录具体宿主、Office 构建号和逐项验收结果，因此上方清单仍需按场景验证。宏格式、网络共享、跨文档链接、所有缩放比例及高对比度界面不作为已完成的实机覆盖。
+diff --git a/src/appearance-dialog.h b/src/appearance-dialog.h
+index 9680d50..ff9fe3c 100644
+--- a/src/appearance-dialog.h
++++ b/src/appearance-dialog.h
+@@ -34,10 +34,10 @@ struct Dialog {
+         HWND child = control(dialog, L"BUTTON", tr(label), BS_OWNERDRAW | WS_TABSTOP, id);
+         SetWindowSubclass(child, dialogui::controlProc, 1, 0);
+     }
+-    void heading(HWND dialog, const wchar_t* title, const wchar_t* subtitle) const {
++    void heading(HWND dialog, const wchar_t* title, const wchar_t* subtitle = nullptr) const {
+         SetWindowTextW(dialog, L"openOfficeTab");
+         control(dialog, L"STATIC", tr(title), SS_NOPREFIX, titleId);
+-        control(dialog, L"STATIC", tr(subtitle), SS_NOPREFIX, subtitleId);
++        if (subtitle) control(dialog, L"STATIC", tr(subtitle), SS_NOPREFIX, subtitleId);
+     }
+     void footer(HWND dialog) const {
+         button(dialog, L"取消", IDCANCEL);
+@@ -46,8 +46,9 @@ struct Dialog {
+     void layout(HWND dialog) {
+         theme.initialize(dialog, host, dark, language);
+         theme.applyFonts(dialog, titleId);
+-        theme.place(dialog, titleId, 80, 23, 376, 30);
+-        theme.place(dialog, subtitleId, 80, 57, 376, 36);
++        const bool hasSubtitle = GetDlgItem(dialog, subtitleId) != nullptr;
++        theme.place(dialog, titleId, 80, hasSubtitle ? 23 : 33, 376, 30);
++        if (hasSubtitle) theme.place(dialog, subtitleId, 80, 57, 376, 36);
+         theme.place(dialog, IDCANCEL, 256, 278, 92, 34);
+         theme.place(dialog, IDOK, 360, 278, 96, 34);
+     }
+@@ -188,8 +189,8 @@ inline INT_PTR CALLBACK widthProc(HWND dialog, UINT message, WPARAM wp, LPARAM l
+         choice = (WidthChoice*)lp;
+         SetWindowLongPtrW(dialog, DWLP_USER, lp);
+         auto& ui = choice->ui;
+-        ui.heading(dialog, L"标签宽度", L"标签宽度（80–360，按缩放自动适配）");
+-        ui.control(dialog, L"STATIC", ui.tr(L"默认宽度"), SS_NOPREFIX, widthLabelId);
++        ui.heading(dialog, L"标签宽度");
++        ui.control(dialog, L"STATIC", ui.tr(L"默认宽度（80–360）"), SS_NOPREFIX, widthLabelId);
+         HWND edit = ui.control(dialog, L"EDIT", std::to_wstring(choice->width).c_str(),
+             WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL, editId);
+         SetWindowSubclass(edit, dialogui::controlProc, 1, 0);
+diff --git a/src/localization.h b/src/localization.h
+index d61a576..dfab59f 100644
+--- a/src/localization.h
++++ b/src/localization.h
+@@ -36,8 +36,7 @@ inline constexpr Entry entries[]={
+     {L"确定",L"OK"},{L"取消",L"Cancel"},
+     {L"请输入 6 位十六进制颜色，例如 #F0F0F0。",L"Enter a six-digit hexadecimal color, such as #F0F0F0."},
+     {L"标签宽度",L"Tab width"},
+-    {L"标签宽度（80–360，按缩放自动适配）",L"Tab width (80–360; scales with DPI)"},
+-    {L"默认宽度",L"Default width"},{L"宽度模式",L"Width mode"},
++    {L"默认宽度（80–360）",L"Default width (80–360)"},{L"宽度模式",L"Width mode"},
+     {L"固定宽度",L"Fixed width"},
+     {L"按标题长度（上述宽度为上限）",L"Fit title (up to the width above)"},
+     {L"空间不足时压缩（上述宽度为上限）",L"Shrink to fit (up to the width above)"},
+diff --git a/src/rename.h b/src/rename.h
+index 129aa79..563a1e1 100644
+--- a/src/rename.h
++++ b/src/rename.h
+@@ -9,6 +9,18 @@ inline std::wstring extension(const std::wstring& path){
+     auto name=leaf(path);auto dot=name.find_last_of(L'.');
+     return dot==std::wstring::npos||dot==0?L"":name.substr(dot);
+ }
++// PpSaveAsFileType values for editable presentation, template, and show files.
++inline long powerPointSaveFormat(const std::wstring& path){
++    auto suffix=extension(path);
++    for(auto& c:suffix)if(c>=L'A'&&c<=L'Z')c+=L'a'-L'A';
++    constexpr struct {const wchar_t* extension;long format;} formats[]={
++        {L".ppt",1},{L".pot",5},{L".pps",7},
++        {L".pptx",24},{L".pptm",25},{L".potx",26},{L".potm",27},
++        {L".ppsx",28},{L".ppsm",29},{L".odp",35}
++    };
++    for(const auto& entry:formats)if(suffix==entry.extension)return entry.format;
++    return 0;
++}
+ inline std::wstring stem(const std::wstring& path){auto name=leaf(path);return name.substr(0,name.size()-extension(path).size());}
+ inline bool validStem(const std::wstring& name,const std::wstring& suffix){
+     if(name.empty()||name==L"."||name==L".."||name.back()==L'.'||name.back()==L' ')return false;
+diff --git a/src/session.cpp b/src/session.cpp
+index 97a199c..3653868 100644
+--- a/src/session.cpp
++++ b/src/session.cpp
+@@ -496,8 +496,10 @@ documentrename::Result Session::renameFile(unsigned long long id,const std::wstr
+     // Case-only names resolve to the existing file on normal Windows volumes.
+     // Do not risk Save As followed by deleting the same file.
+     if(storage::normalize(newPath)==storage::normalize(oldPath))return Result::failed;
+-    DWORD attributes=GetFileAttributesW(newPath.c_str());
+-    if(attributes!=INVALID_FILE_ATTRIBUTES||GetLastError()!=ERROR_FILE_NOT_FOUND)return Result::failed;
++    const auto targetIsAbsent=[&]{
++        return GetFileAttributesW(newPath.c_str())==INVALID_FILE_ATTRIBUTES&&GetLastError()==ERROR_FILE_NOT_FOUND;
++    };
++    if(!targetIsAbsent())return Result::failed;
+     HANDLE original=CreateFileW(oldPath.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+     if(original==INVALID_HANDLE_VALUE)return Result::failed;
+     struct File {HANDLE value;~File(){CloseHandle(value);}} originalFile{original};
+@@ -508,10 +510,19 @@ documentrename::Result Session::renameFile(unsigned long long id,const std::wstr
+         Flag busy(executing);
+         // Recheck live COM state; a modal prompt may have outlived a refresh.
+         if(call(v->document.get(),L"FullName").str()!=oldPath||call(v->document.get(),L"ReadOnly").boolean())return Result::failed;
+-        auto format=call(v->document.get(),host==Host::Word?L"SaveFormat":L"FileFormat");
++        Var format;
++        if(host==Host::PowerPoint){
++            // Presentation has no FileFormat property. Supply PpSaveAsFileType explicitly.
++            const auto pptFormat=documentrename::powerPointSaveFormat(oldPath);
++            if(!pptFormat)return Result::failed;
++            format=Var(pptFormat);
++        }else{
++            format=call(v->document.get(),host==Host::Word?L"SaveFormat":L"FileFormat");
++        }
+         result=documentrename::perform([&]{
+             call(v->window.get(),L"Activate",DISPATCH_METHOD);
+-            // Keep the original format (including macros); never close/reopen the document.
++            // Activation can run Office event handlers that create the destination.
++            if(!targetIsAbsent())return false;
+             call(v->document.get(),host==Host::Word?L"SaveAs2":L"SaveAs",DISPATCH_METHOD,{Var(newPath),format});
+             return true;
+         },[&]{
+diff --git a/tests/rename-dialog-preview.cpp b/tests/rename-dialog-preview.cpp
+index b6dcbd8..0b89886 100644
+--- a/tests/rename-dialog-preview.cpp
++++ b/tests/rename-dialog-preview.cpp
+@@ -75,6 +75,10 @@ void previewWidth(Host host, bool dark, int language, const wchar_t* path) {
+     HWND dialog = CreateDialogIndirectParamW(module, &data.dialog, nullptr, appearanceui::widthProc, (LPARAM)&choice);
+     showOffscreen(dialog);
+     checkBounds(dialog);
++    assert(!GetDlgItem(dialog, appearanceui::subtitleId));
++    wchar_t label[64]{};
++    assert(GetDlgItemTextW(dialog, appearanceui::widthLabelId, label, (int)std::size(label)) > 0);
++    assert(std::wstring(label) == (language == 1 ? L"默认宽度（80–360）" : L"Default width (80–360)"));
+     assert(SendDlgItemMessageW(dialog, appearanceui::modeId, CB_GETCOUNT, 0, 0) == 3);
+     assert(SendDlgItemMessageW(dialog, appearanceui::modeId, CB_GETCURSEL, 0, 0) == 2);
+     capture(dialog, path);
+diff --git a/tests/rename-session-test.cpp b/tests/rename-session-test.cpp
+index bd03b47..5c46614 100644
+--- a/tests/rename-session-test.cpp
++++ b/tests/rename-session-test.cpp
+@@ -1,6 +1,7 @@
+ // No Office installation required: real Win32 files and mock Office IDispatch.
+ #include "../src/model.h"
+ #include <cassert>
++#include <cstring>
+ #include <iostream>
+ class Dispatch final:public IDispatch {
+     ULONG refs=1;
+@@ -22,18 +23,37 @@ public:
+ };
+ Ptr<Dispatch> dispatch(){return Ptr<Dispatch>(new Dispatch(),false);}
+ bool exists(const std::wstring& path){return GetFileAttributesW(path.c_str())!=INVALID_FILE_ATTRIBUTES;}
+-void write(const std::wstring& path){
++void write(const std::wstring& path,const char* contents="fixture"){
+     HANDLE f=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);assert(f!=INVALID_HANDLE_VALUE);
+-    DWORD written=0;assert(WriteFile(f,"fixture",7,&written,nullptr)&&written==7);CloseHandle(f);
++    DWORD written=0,size=(DWORD)std::strlen(contents);
++    assert(WriteFile(f,contents,size,&written,nullptr)&&written==size);CloseHandle(f);
++}
++std::string read(const std::wstring& path){
++    HANDLE f=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
++    assert(f!=INVALID_HANDLE_VALUE);
++    char contents[64]{};DWORD size=0;
++    assert(ReadFile(f,contents,(DWORD)sizeof(contents),&size,nullptr));CloseHandle(f);
++    return std::string(contents,size);
+ }
+ int main(){
+     assert(SUCCEEDED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED)));
+     wchar_t cwd[32768];GetCurrentDirectoryW(32768,cwd);
+-    for(auto host:{Host::Word,Host::Excel,Host::PowerPoint}){
+-        auto root=std::wstring(cwd)+L"\\rename-session-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring((int)host);assert(CreateDirectoryW(root.c_str(),nullptr));
+-        auto suffix=host==Host::Word?L".docm":host==Host::Excel?L".xlsm":L".pptm";
++    constexpr struct {Host host;const wchar_t* suffix;long format;} fixtures[]={
++        {Host::Word,L".docm",13},{Host::Excel,L".xlsm",52},
++        {Host::PowerPoint,L".pptx",24},{Host::PowerPoint,L".PPTM",25},
++        {Host::PowerPoint,L".potx",26},{Host::PowerPoint,L".potm",27},
++        {Host::PowerPoint,L".ppsx",28},{Host::PowerPoint,L".ppsm",29}
++    };
++    for(const auto& fixture:fixtures){
++        const auto host=fixture.host;
++        const auto suffix=fixture.suffix;
++        const auto format=fixture.format;
++        auto root=std::wstring(cwd)+L"\\rename-session-"+std::to_wstring(GetCurrentProcessId())+suffix;
++        assert(CreateDirectoryW(root.c_str(),nullptr));
+         auto original=root+L"\\original"+suffix;write(original);
+-        std::wstring path=original;bool readOnly=false,saved=false,cancelSave=false,wrongPath=false;int saves=0;
++        std::wstring path=original;
++        const auto lateCollision=root+L"\\late-collision"+suffix;
++        bool readOnly=false,saved=false,cancelSave=false,wrongPath=false,createOnActivate=false;int saves=0;
+         auto app=dispatch(),document=dispatch(),window=dispatch(),docs=dispatch(),windows=dispatch(),protectedViews=dispatch();
+         HWND native=CreateWindowExW(0,L"STATIC",L"",WS_OVERLAPPEDWINDOW,0,0,800,500,nullptr,nullptr,module,nullptr);assert(native);
+         app->add(L"Name",[&](DISPPARAMS*){return Var(std::wstring(host==Host::Word?L"Word":host==Host::Excel?L"Excel":L"PowerPoint"));});
+@@ -47,16 +67,22 @@ int main(){
+         protectedViews->add(L"Count",[](DISPPARAMS*){return Var(0L);});
+         window->add(L"Hwnd",[&](DISPPARAMS*){return Var((long)(DWORD)(UINT_PTR)native);});
+         window->add(host==Host::PowerPoint?L"Presentation":L"Document",[&](DISPPARAMS*){return Var(document.get());});
+-        window->add(L"Visible",[](DISPPARAMS*){return Var(true);});window->add(L"Activate",[](DISPPARAMS*){return Var();});
++        window->add(L"Visible",[](DISPPARAMS*){return Var(true);});
++        window->add(L"Activate",[&](DISPPARAMS*){
++            if(createOnActivate)write(lateCollision,"other document");
++            return Var();
++        });
+         document->add(L"Windows",[&](DISPPARAMS*){return Var(windows.get());});
+         document->add(L"Name",[&](DISPPARAMS*){return Var(documentrename::leaf(path));});
+         document->add(L"Path",[&](DISPPARAMS*){return Var(root);});document->add(L"FullName",[&](DISPPARAMS*){return Var(path);});
+         document->add(L"Saved",[&](DISPPARAMS*){return Var(saved);});document->add(L"ReadOnly",[&](DISPPARAMS*){return Var(readOnly);});
+-        document->add(host==Host::Word?L"SaveFormat":L"FileFormat",[](DISPPARAMS*){return Var(13L);});
++        if(host!=Host::PowerPoint){
++            document->add(host==Host::Word?L"SaveFormat":L"FileFormat",[&](DISPPARAMS*){return Var(format);});
++        }
+         document->add(host==Host::Word?L"SaveAs2":L"SaveAs",[&](DISPPARAMS* args){
+-            assert(args->cArgs==2&&args->rgvarg[0].vt==VT_I4&&args->rgvarg[0].lVal==13);
++            assert(args->cArgs==2&&args->rgvarg[0].vt==VT_I4&&args->rgvarg[0].lVal==format);
+             ++saves;if(cancelSave)return Var();
+-            auto destination=std::wstring(args->rgvarg[1].bstrVal);assert(CopyFileW(path.c_str(),destination.c_str(),TRUE));
++            auto destination=std::wstring(args->rgvarg[1].bstrVal);assert(CopyFileW(path.c_str(),destination.c_str(),FALSE));
+             if(!wrongPath)path=destination;saved=true;return Var();
+         });
+         auto session=std::make_shared<Session>(app.get(),root);session->settings.group=false;
+@@ -68,6 +94,10 @@ int main(){
+         assert(session->renameFile(1,L"../escape")==Result::failed&&saves==0);
+         auto collision=root+L"\\collision"+suffix;write(collision);
+         assert(session->renameFile(1,L"collision")==Result::failed&&saves==0&&exists(collision));
++        createOnActivate=true;
++        assert(session->renameFile(1,L"late-collision")==Result::failed&&saves==0);
++        assert(read(lateCollision)=="other document"&&read(original)=="fixture"&&path==original);
++        createOnActivate=false;
+         session->find(1)->readOnly=true;assert(session->renameFile(1,L"new")==Result::failed&&saves==0);session->find(1)->readOnly=false;
+         readOnly=true;assert(session->renameFile(1,L"new")==Result::failed&&saves==0);readOnly=false;
+         session->executing=true;assert(session->renameFile(1,L"new")==Result::failed);session->executing=false;
+@@ -83,7 +113,7 @@ int main(){
+         assert(session->renameFile(1,L"retained")==Result::originalRetained&&exists(previous)&&exists(path));CloseHandle(reader);
+         assert(session->recentlyClosed().empty()); // Renaming is not closing.
+         session.reset();DestroyWindow(native);
+-        for(auto name:{L"collision",L"unverified",L"renamed",L"retained"})DeleteFileW((root+L"\\"+name+suffix).c_str());
++        for(auto name:{L"collision",L"late-collision",L"unverified",L"renamed",L"retained"})DeleteFileW((root+L"\\"+name+suffix).c_str());
+         for(auto name:{L"settings.ini",L"documents.ini"})DeleteFileW((root+L"\\"+name).c_str());
+         assert(RemoveDirectoryW(root.c_str()));
+     }
