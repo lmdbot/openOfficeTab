@@ -1,0 +1,60 @@
+name: Publish Fork prerelease 4
+on:
+  push:
+    branches: ['release-publish/fork.4']
+    paths: ['.github/workflows/publish-fork-4.yml']
+permissions:
+  actions: read
+  contents: write
+jobs:
+  publish:
+    if: github.repository == 'lmdbot/openOfficeTab'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify and publish the original Windows CI artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: v0.2.3-beta.3-fork.4
+          RELEASE_COMMIT: 36b4b9cee0665f6476a9a6d6c8b6028706d6a1b4
+        run: |
+          set -euo pipefail
+          gh api "repos/$GH_REPO/actions/runs/43115325295" |
+            jq -e --arg commit "$RELEASE_COMMIT" '.conclusion == "success" and .head_sha == $commit' >/dev/null
+          gh api "repos/$GH_REPO/actions/artifacts/13899306005/zip" > artifact.zip
+          echo 'c84107d4aecf36487f8d937c4c96198ea63a39570efca05a99dbf01cabc79315  artifact.zip' | sha256sum --check
+          mkdir verified
+          unzip -q artifact.zip -d verified
+          setup=openOfficetab-0.2.3-beta.3-setup-x64.exe
+          zip=openOfficetab-0.2.3-beta.3-win-x64.zip
+          sums=SHA256SUMS.txt
+          (cd verified && sha256sum --strict --check "$sums")
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "A release already exists for $RELEASE_TAG."
+            exit 1
+          fi
+          cat > release-notes.md <<'NOTES'
+          此版本合入上游 [PR #6](https://github.com/xlennart/openOfficeTab/pull/6) 和 [PR #7](https://github.com/xlennart/openOfficeTab/pull/7) 的最新修订。
+
+          - 标签右键重命名保留普通和 Strict `.pptx` 的原格式。无法确认格式时会停止，同名文件也不会被覆盖。确认框会提示重新打开文档后撤销历史将清空。
+          - 新版菜单样式覆盖标签右键、「最近关闭」和「⋯」菜单及其子菜单。
+
+          适用于 64 位 Windows，内含 32 位和 64 位 Office 加载项。安装前请保存文档并退出 Word、Excel 和 PowerPoint。可运行 EXE，或完整解压 ZIP 后运行 `Install.cmd`。
+
+          [GitHub Actions 构建](https://github.com/lmdbot/openOfficeTab/actions/runs/43115325295) 已通过原生回归、COM ABI 和安装包内嵌 DLL 校验。可用 `SHA256SUMS.txt` 核对两个下载文件。
+          NOTES
+          gh release create "$RELEASE_TAG" "verified/$setup" "verified/$zip" "verified/$sums" \
+            --draft --prerelease --target "$RELEASE_COMMIT" \
+            --title 'openOfficeTab 0.2.3-beta.3 · Fork 预发布 4' --notes-file release-notes.md
+          gh release view "$RELEASE_TAG" --json assets,isDraft,isPrerelease,targetCommitish |
+            jq -e --arg commit "$RELEASE_COMMIT" --arg setup "$setup" --arg zip "$zip" --arg sums "$sums" \
+              '.isDraft and .isPrerelease and .targetCommitish == $commit and ([.assets[].name] | sort) == ([$setup, $zip, $sums] | sort)' >/dev/null
+          gh release download "$RELEASE_TAG" --dir roundtrip --pattern "$setup" --pattern "$zip" --pattern "$sums"
+          for name in "$setup" "$zip" "$sums"; do
+            cmp "verified/$name" "roundtrip/$name"
+          done
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" |
+            jq -e --arg commit "$RELEASE_COMMIT" '.object.type == "commit" and .object.sha == $commit' >/dev/null
+          gh release view "$RELEASE_TAG" --json url,isDraft,isPrerelease,assets
