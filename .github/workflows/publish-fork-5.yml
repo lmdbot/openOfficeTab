@@ -1,0 +1,90 @@
+name: Publish Fork prerelease 5
+on:
+  push:
+    branches: ['release-publish/fork.5']
+    paths: ['.github/workflows/publish-fork-5.yml']
+permissions:
+  actions: read
+  contents: write
+jobs:
+  publish:
+    if: github.repository == 'lmdbot/openOfficeTab'
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    steps:
+      - name: Wait for the Windows release build and verify its artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_RUN: '43145315544'
+          RELEASE_COMMIT: 'a710e2cec801b45a5c21c77d3deae98ef63f5837'
+        run: |
+          set -euo pipefail
+          for attempt in {1..72}; do
+            gh api "repos/$GH_REPO/actions/runs/$BUILD_RUN" > build-run.json
+            jq -e --arg commit "$RELEASE_COMMIT" --arg repo "$GH_REPO" \
+              '.head_sha == $commit and .head_branch == "release/rename-ui" and .head_repository.full_name == $repo' build-run.json >/dev/null
+            status=$(jq -r '.status' build-run.json)
+            if [[ "$status" == completed ]]; then
+              jq -e '.conclusion == "success"' build-run.json >/dev/null
+              break
+            fi
+            echo "Windows build $BUILD_RUN is $status ($attempt/72)."
+            sleep 15
+          done
+          jq -e '.status == "completed" and .conclusion == "success"' build-run.json >/dev/null
+          gh api "repos/$GH_REPO/actions/runs/$BUILD_RUN/artifacts?name=openOfficetab-fork-release-win-x64" |
+            jq -e --arg commit "$RELEASE_COMMIT" \
+              '.artifacts | map(select(.expired == false and .workflow_run.head_sha == $commit and .name == "openOfficetab-fork-release-win-x64")) | select(length == 1) | .[0]' > build-artifact.json
+          id=$(jq -r '.id' build-artifact.json)
+          digest=$(jq -r '.digest' build-artifact.json)
+          [[ "$id" =~ ^[0-9]+$ && "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          gh api "repos/$GH_REPO/actions/artifacts/$id/zip" > artifact.zip
+          printf '%s  artifact.zip\n' "${digest#sha256:}" | sha256sum --check
+          setup=openOfficetab-0.2.3-beta.3-setup-x64.exe
+          zip=openOfficetab-0.2.3-beta.3-win-x64.zip
+          sums=SHA256SUMS.txt
+          diff <(unzip -Z1 artifact.zip | sort) <(printf '%s\n' "$setup" "$zip" "$sums" | sort)
+          mkdir verified
+          unzip -q artifact.zip -d verified
+          (cd verified && sha256sum --strict --check "$sums")
+      - name: Publish and verify the Fork prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: v0.2.3-beta.3-fork.5
+          RELEASE_COMMIT: 'a710e2cec801b45a5c21c77d3deae98ef63f5837'
+        run: |
+          set -euo pipefail
+          setup=openOfficetab-0.2.3-beta.3-setup-x64.exe
+          zip=openOfficetab-0.2.3-beta.3-win-x64.zip
+          sums=SHA256SUMS.txt
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1 ||
+              gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "A release or tag already exists for $RELEASE_TAG."
+            exit 1
+          fi
+          cat > release-notes.md <<'NOTES'
+          此版本更新标签右键重命名。前台 Word、Excel 和 PowerPoint 文档在关闭和重开期间保留原窗口画面，等新窗口重绘后再切换，以减少闪动。文件按原格式保存并原子改名，目标同名时保留两份文件。重新打开文档会重置 Office 撤销历史，确认框会提前提示。
+
+          适用于 64 位 Windows，包含 32 位和 64 位 Office 加载项。安装前请保存文档并退出 Word、Excel 和 PowerPoint。可运行 EXE 安装包，或完整解压 ZIP 后运行 `Install.cmd`。
+
+          安装包来自 [Windows 构建](https://github.com/lmdbot/openOfficeTab/actions/runs/43145315544)，可用 `SHA256SUMS.txt` 核对两个下载文件。三款 Office 的窗口过渡采样及待验收场景见 [PR #6 验证记录](https://github.com/xlennart/openOfficeTab/pull/6#issuecomment-6812859683)。
+          NOTES
+          gh release create "$RELEASE_TAG" "verified/$setup" "verified/$zip" "verified/$sums" \
+            --draft --prerelease --target "$RELEASE_COMMIT" \
+            --title 'openOfficeTab 0.2.3-beta.3 · Fork 预发布 5' --notes-file release-notes.md
+          gh release view "$RELEASE_TAG" --json assets,isDraft,isPrerelease,targetCommitish |
+            jq -e --arg commit "$RELEASE_COMMIT" --arg setup "$setup" --arg zip "$zip" --arg sums "$sums" \
+              '.isDraft and .isPrerelease and .targetCommitish == $commit and ([.assets[].name] | sort) == ([$setup, $zip, $sums] | sort)' >/dev/null
+          gh release download "$RELEASE_TAG" --dir roundtrip --pattern "$setup" --pattern "$zip" --pattern "$sums"
+          for name in "$setup" "$zip" "$sums"; do
+            cmp "verified/$name" "roundtrip/$name"
+          done
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+          gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" |
+            jq -e --arg commit "$RELEASE_COMMIT" '.object.type == "commit" and .object.sha == $commit' >/dev/null
+          gh release view "$RELEASE_TAG" --json url,isDraft,isPrerelease,assets |
+            jq -e 'select(.isDraft == false and .isPrerelease and (.assets | length) == 3)'
