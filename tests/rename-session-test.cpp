@@ -86,6 +86,13 @@ void run(Host host, const wchar_t* suffix, int format, int sequence){
     std::wstring path=original;
     bool open=true,saved=false,readOnly=false,cancelSave=false,cancelClose=false;
     bool collisionOnSave=false,collisionOnClose=false,replaceOnClose=false;
+    bool collisionOnActivate=false;
+    bool collisionInDialog=false, saveElsewhere=false, changeFormat=false, alerts=true;
+    const bool nativeDialog=host!=Host::PowerPoint;
+    long fileFormat=host==Host::Word?(sequence==0?13:16):(sequence==1?52:51);
+    const long originalFormat=fileFormat;
+    std::wstring dialogPath;
+    int saveAsCalls=0;
     long windowCount=1;
     int saves=0,closes=0,opens=0;
     auto app=dispatch(),document=dispatch(),window=dispatch(),docs=dispatch(),windows=dispatch();
@@ -96,6 +103,42 @@ void run(Host host, const wchar_t* suffix, int format, int sequence){
     app->add(host==Host::Word?L"Documents":host==Host::Excel?L"Workbooks":L"Presentations",[&](DISPPARAMS*){return Var(docs.get());});
     app->add(L"Windows",[&](DISPPARAMS*){return Var(windows.get());});
     app->add(L"ActiveWindow",[&](DISPPARAMS*){return Var(window.get());});
+    auto dialogs=dispatch(),dialog=dispatch();
+    if(nativeDialog){
+        app->add(L"DisplayAlerts",[&](DISPPARAMS*){return Var(alerts?-1L:0L);});
+        app->add(L"Dialogs",[&](DISPPARAMS*){return Var(dialogs.get());});
+        dialogs->add(L"Item",[&](DISPPARAMS* args){
+            assert(args->cArgs==1&&args->rgvarg[0].lVal==(host==Host::Word?84:5));
+            return Var(dialog.get());
+        });
+        dialog->add(L"Name",[&](DISPPARAMS* args){
+            assert(args->cArgs==1&&args->rgvarg[0].vt==VT_BSTR&&host==Host::Word);
+            dialogPath=args->rgvarg[0].bstrVal;
+            return Var();
+        });
+        dialog->add(L"Format",[&](DISPPARAMS* args){
+            assert(args->cArgs==1&&args->rgvarg[0].vt==VT_I4&&args->rgvarg[0].lVal==originalFormat);
+            return Var();
+        });
+        document->add(host==Host::Word?L"SaveFormat":L"FileFormat",[&](DISPPARAMS*){return Var(fileFormat);});
+        dialog->add(L"Show",[&](DISPPARAMS* args){
+            if(host==Host::Word)assert(args->cArgs==0);
+            else{
+                assert(args->cArgs==2&&args->rgvarg[0].vt==VT_I4&&args->rgvarg[0].lVal==originalFormat&&
+                    args->rgvarg[1].vt==VT_BSTR);
+                dialogPath=args->rgvarg[1].bstrVal;
+            }
+            assert(open&&path==original&&!exists(dialogPath));
+            ++saveAsCalls;
+            if(collisionInDialog)writeFile(dialogPath,"collision in native dialog");
+            if(cancelSave||collisionInDialog)return Var(0L);
+            path=saveElsewhere?file(L"elsewhere"):dialogPath;
+            writeFile(path,"saved edits");
+            if(changeFormat)++fileFormat;
+            saved=true;
+            return Var(-1L);
+        });
+    }
     docs->add(L"Count",[&](DISPPARAMS*){return Var(open?1L:0L);});
     docs->add(L"Item",[&](DISPPARAMS*){assert(open);return Var(document.get());});
     docs->add(L"Open",[&](DISPPARAMS* args){
@@ -109,7 +152,10 @@ void run(Host host, const wchar_t* suffix, int format, int sequence){
     window->add(L"Hwnd",[&](DISPPARAMS*){return Var((long)(DWORD)(UINT_PTR)native);});
     window->add(host==Host::PowerPoint?L"Presentation":L"Document",[&](DISPPARAMS*){return Var(document.get());});
     window->add(L"Visible",[](DISPPARAMS*){return Var(true);});
-    window->add(L"Activate",[](DISPPARAMS*){return Var();});
+    window->add(L"Activate",[&](DISPPARAMS*){
+        if(collisionOnActivate)writeFile(file(L"new"),"collision during activation");
+        return Var();
+    });
     document->add(L"Windows",[&](DISPPARAMS*){return Var(windows.get());});
     document->add(L"Name",[&](DISPPARAMS*){return Var(documentrename::leaf(path));});
     document->add(L"Path",[&](DISPPARAMS*){return Var(root);});
@@ -121,6 +167,31 @@ void run(Host host, const wchar_t* suffix, int format, int sequence){
         ++saves;
         if(collisionOnSave)writeFile(file(L"appeared-during-save"),"collision during save");
         if(!cancelSave)saved=true;
+        return Var();
+    });
+    if(format==1||format==2)document->add(L"SaveAs",[&](DISPPARAMS* args){
+        assert(open&&path==original&&args->cArgs==2&&args->rgvarg[0].vt==VT_I4&&args->rgvarg[1].vt==VT_BSTR);
+        assert(args->rgvarg[0].lVal==(format==2?38:24));
+        ++saveAsCalls;
+        const std::wstring target=args->rgvarg[1].bstrVal;
+        if(cancelSave)return Var();
+        assert(!CopyFileW(original.c_str(),target.c_str(),TRUE));
+        const auto competitor=file(L"existing");
+        assert(!MoveFileExW(competitor.c_str(),target.c_str(),MOVEFILE_REPLACE_EXISTING));
+        assert(readFile(competitor)=="existing target");
+        auto fileHandle=CreateFileW(target.c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,
+            nullptr,TRUNCATE_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+        assert(fileHandle!=INVALID_HANDLE_VALUE);
+        DWORD written=0;
+        assert(WriteFile(fileHandle,originalBytes.data(),static_cast<DWORD>(originalBytes.size()),&written,nullptr)&&
+            written==originalBytes.size());
+        assert(CloseHandle(fileHandle));
+        if(replaceOnClose) {
+            assert(MoveFileW(original.c_str(),file(L"outside-backup").c_str()));
+            writeFile(original,"replacement original path");
+        }
+        path=target;
+        saved=true;
         return Var();
     });
     document->add(L"Close",[&](DISPPARAMS* args){
@@ -147,6 +218,76 @@ void run(Host host, const wchar_t* suffix, int format, int sequence){
     if(format==3||format==4){
         assert(session->renameFile(1,L"rejected")==Result::failed&&saves==0&&closes==0&&open);
         assert(readFile(original)==originalBytes&&!exists(file(L"rejected")));
+    }else if(format==1||format==2){
+        writeFile(file(L"existing"),"existing target");
+        assert(session->renameFile(1,L"existing")==Result::failed&&saveAsCalls==0);
+        collisionOnActivate=true;
+        assert(session->renameFile(1,L"new")==Result::failed&&saveAsCalls==0);
+        assert(readFile(file(L"new"))=="collision during activation"&&readFile(original)==originalBytes);
+        assert(DeleteFileW(file(L"new").c_str()));
+        collisionOnActivate=false;
+        document->reject=L"SaveAs";
+        assert(session->renameFile(1,L"new")==Result::failed&&!exists(file(L"new")));
+        document->reject.clear();
+        cancelSave=true;
+        assert(session->renameFile(1,L"new")==Result::failed&&!exists(file(L"new"))&&readFile(original)==originalBytes);
+        cancelSave=false;
+        replaceOnClose=format==2;
+        assert(session->renameFile(1,L"renamed")== (replaceOnClose?Result::originalRetained:Result::renamed));
+        assert(open&&path==file(L"renamed")&&saves==0&&closes==0&&opens==0&&saveAsCalls==2);
+        assert(readFile(path)==originalBytes);
+        if(replaceOnClose){
+            assert(readFile(original)=="replacement original path");
+            assert(readFile(file(L"outside-backup"))==originalBytes);
+        }else assert(!exists(original));
+        assert(session->views.size()==1&&session->views.front()->id==1&&session->views.front()->locked&&
+            session->views.front()->manualTabWidth==196);
+        assert(session->recentlyClosed().empty());
+    }else if(nativeDialog){
+        assert(session->renameFile(1,L"original")==Result::renamed&&!saved);
+        assert(session->renameFile(1,L"ORIGINAL")==Result::failed);
+        assert(session->renameFile(1,L"../escape")==Result::failed);
+        readOnly=true;
+        assert(session->renameFile(1,L"new")==Result::failed);
+        readOnly=false;
+        windowCount=2;
+        assert(session->renameFile(1,L"new")==Result::failed);
+        windowCount=1;
+        alerts=false;
+        assert(session->renameFile(1,L"new")==Result::alertsDisabled);
+        alerts=true;
+        writeFile(file(L"existing"),"existing target");
+        assert(session->renameFile(1,L"existing")==Result::failed&&saveAsCalls==0);
+        collisionOnActivate=true;
+        assert(session->renameFile(1,L"new")==Result::failed&&saveAsCalls==0);
+        assert(readFile(file(L"new"))=="collision during activation");
+        assert(DeleteFileW(file(L"new").c_str()));
+        collisionOnActivate=false;
+        cancelSave=true;
+        assert(session->renameFile(1,L"new")==Result::canceled&&!exists(file(L"new"))&&!saved);
+        cancelSave=false;
+        collisionInDialog=true;
+        assert(session->renameFile(1,L"new")==Result::canceled&&path==original);
+        assert(readFile(file(L"new"))=="collision in native dialog"&&readFile(original)==originalBytes);
+
+        collisionInDialog=false;
+        HANDLE lock=INVALID_HANDLE_VALUE;
+        if(sequence==1){
+            lock=CreateFileW(original.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,0,nullptr);
+            assert(lock!=INVALID_HANDLE_VALUE);
+        }
+        saveElsewhere=sequence==2;
+        changeFormat=sequence==3;
+        assert(session->renameFile(1,L"renamed")== (sequence==0?Result::renamed:Result::originalRetained));
+        if(lock!=INVALID_HANDLE_VALUE)assert(CloseHandle(lock));
+        assert(open&&path==file(saveElsewhere?L"elsewhere":L"renamed")&&saved&&readFile(path)=="saved edits");
+        assert(saves==0&&closes==0&&opens==0&&saveAsCalls==3);
+        assert(readFile(file(L"existing"))=="existing target");
+        if(sequence==0)assert(!exists(original));
+        else assert(readFile(original)==originalBytes);
+        assert(session->views.size()==1&&session->views.front()->id==1&&session->views.front()->path==path&&
+            session->views.front()->locked&&session->views.front()->manualTabWidth==196);
+        assert(session->recentlyClosed().empty());
     }else{
         assert(session->renameFile(1,L"original")==Result::renamed&&saves==0&&!saved);
         assert(session->renameFile(1,L"ORIGINAL")==Result::failed&&saves==0);
@@ -201,7 +342,7 @@ void run(Host host, const wchar_t* suffix, int format, int sequence){
     }
     session.reset();
     DestroyWindow(native);
-    for(auto name:{L"original",L"renamed",L"existing",L"appeared-during-save",L"appeared-after-close",L"outside-backup"})
+    for(auto name:{L"original",L"new",L"elsewhere",L"renamed",L"existing",L"appeared-during-save",L"appeared-after-close",L"outside-backup"})
         DeleteFileW(file(name).c_str());
     for(auto name:{L"settings.ini",L"documents.ini"})DeleteFileW((root+L"\\"+name).c_str());
     assert(RemoveDirectoryW(root.c_str()));
@@ -218,6 +359,8 @@ int main(){
     run(Host::PowerPoint,L".PPTX",2,6);
     run(Host::PowerPoint,L".pptx",3,7);
     run(Host::PowerPoint,L".pptx",4,8);
+    run(Host::PowerPoint,L".pptm",0,0);
+    run(Host::PowerPoint,L".pptm",0,1);
     CoUninitialize();
-    std::cout<<"Native no-overwrite rename, Office cancellation/reopen, file identity, and PowerPoint package formats passed.\n";
+    std::cout<<"Native Save As flows, file conflicts and identity, PowerPoint package formats and legacy reopen passed.\n";
 }

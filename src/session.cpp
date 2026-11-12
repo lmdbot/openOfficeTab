@@ -565,7 +565,11 @@ PresentationFormat presentationFormat(const std::wstring& path) {
 
 struct RenameFileHandle {
     HANDLE value;
-    ~RenameFileHandle() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
+    ~RenameFileHandle() { close(); }
+    void close() {
+        if (value != INVALID_HANDLE_VALUE) CloseHandle(value);
+        value = INVALID_HANDLE_VALUE;
+    }
 };
 
 bool fileStamp(HANDLE file, BY_HANDLE_FILE_INFORMATION& stamp) {
@@ -573,12 +577,129 @@ bool fileStamp(HANDLE file, BY_HANDLE_FILE_INFORMATION& stamp) {
         !(stamp.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_REPARSE_POINT));
 }
 
+bool sameFileIdentity(const BY_HANDLE_FILE_INFORMATION& actual, const BY_HANDLE_FILE_INFORMATION& expected) {
+    return expected.dwVolumeSerialNumber == actual.dwVolumeSerialNumber &&
+        expected.nFileIndexHigh == actual.nFileIndexHigh && expected.nFileIndexLow == actual.nFileIndexLow &&
+        expected.ftCreationTime.dwLowDateTime == actual.ftCreationTime.dwLowDateTime &&
+        expected.ftCreationTime.dwHighDateTime == actual.ftCreationTime.dwHighDateTime;
+}
+
 bool sameSavedFile(HANDLE file, const BY_HANDLE_FILE_INFORMATION& expected) {
     BY_HANDLE_FILE_INFORMATION actual{};
-    return fileStamp(file, actual) && expected.dwVolumeSerialNumber == actual.dwVolumeSerialNumber &&
-        expected.nFileIndexHigh == actual.nFileIndexHigh && expected.nFileIndexLow == actual.nFileIndexLow &&
+    return fileStamp(file, actual) && sameFileIdentity(actual, expected) &&
         expected.nFileSizeHigh == actual.nFileSizeHigh && expected.nFileSizeLow == actual.nFileSizeLow &&
         CompareFileTime(&expected.ftLastWriteTime, &actual.ftLastWriteTime) == 0;
+}
+
+bool removeSavedFile(const std::wstring& path, const BY_HANDLE_FILE_INFORMATION& expected) {
+    RenameFileHandle file{CreateFileW(path.c_str(), DELETE | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+    if (!sameSavedFile(file.value, expected)) return false;
+    FILE_DISPOSITION_INFO disposition{TRUE};
+    return SetFileInformationByHandle(file.value, FileDispositionInfo, &disposition, sizeof(disposition)) != FALSE;
+}
+
+bool availableName(const std::wstring& path) {
+    return GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES &&
+        GetLastError() == ERROR_FILE_NOT_FOUND;
+}
+
+documentrename::Result saveDocumentUsingDialog(Host host, IDispatch* app, IDispatch* document,
+        const std::wstring& oldPath, const std::wstring& newPath) {
+    using documentrename::Result;
+    const bool word = host == Host::Word;
+    // Leave the native overwrite and format confirmations under user control.
+    if (call(app, L"DisplayAlerts").number() != -1) return Result::alertsDisabled;
+    const auto formatProperty = word ? L"SaveFormat" : L"FileFormat";
+    const auto format = call(document, formatProperty).number(LONG_MIN);
+    if (format == LONG_MIN) return Result::failed;
+    auto dialogs = call(app, L"Dialogs").disp();
+    constexpr long wordSaveAsDialog = 84, excelSaveAsDialog = 5;
+    auto dialog = item(dialogs.get(), word ? wordSaveAsDialog : excelSaveAsDialog);
+    if (word) {
+        put(dialog.get(), L"Name", Var(newPath));
+        put(dialog.get(), L"Format", Var(format));
+    }
+
+    RenameFileHandle original{CreateFileW(oldPath.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+    BY_HANDLE_FILE_INFORMATION stamp{};
+    if (!fileStamp(original.value, stamp) || !availableName(newPath)) return Result::failed;
+    // Office must be free to release its old file and switch paths.
+    original.close();
+
+    const bool confirmed = word ?
+        call(dialog.get(), L"Show", DISPATCH_METHOD).number() == -1 :
+        call(dialog.get(), L"Show", DISPATCH_METHOD, {Var(newPath), Var(format)}).boolean();
+    if (!confirmed) return Result::canceled;
+    const auto activePath = storage::normalize(call(document, L"FullName").str());
+    if (activePath == storage::normalize(oldPath)) return Result::canceled;
+    if (!call(document, L"Saved").boolean() || call(document, L"ReadOnly").boolean()) return Result::failed;
+    // The native dialog also lets the user change the path or format. Such a
+    // Save As should leave the original in place.
+    if (activePath != storage::normalize(newPath) ||
+        call(document, formatProperty).number(LONG_MIN) != format) return Result::originalRetained;
+    RenameFileHandle target{CreateFileW(newPath.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+    BY_HANDLE_FILE_INFORMATION saved{};
+    if (!fileStamp(target.value, saved) || sameFileIdentity(saved, stamp) ||
+        !(saved.nFileSizeHigh || saved.nFileSizeLow)) return Result::originalRetained;
+    return removeSavedFile(oldPath, stamp) ? Result::renamed : Result::originalRetained;
+}
+
+struct PresentationSaveTarget {
+    const std::wstring& path;
+    RenameFileHandle file;
+    BY_HANDLE_FILE_INFORMATION initial{};
+    bool reserved;
+
+    explicit PresentationSaveTarget(const std::wstring& target) :
+        path(target),
+        // CREATE_NEW acquires the name atomically. Keep it open without
+        // FILE_SHARE_DELETE so the reservation cannot be moved or replaced
+        // while PowerPoint writes into the existing file.
+        file{CreateFileW(target.c_str(), FILE_READ_DATA | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)},
+        reserved(fileStamp(file.value, initial)) {}
+
+    ~PresentationSaveTarget() {
+        const bool unused = reserved && sameSavedFile(file.value, initial);
+        file.close();
+        if (unused) removeSavedFile(path, initial);
+    }
+
+    bool containsSavedPresentation() const {
+        RenameFileHandle current{CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+        BY_HANDLE_FILE_INFORMATION stamp{};
+        return fileStamp(current.value, stamp) && sameFileIdentity(stamp, initial) &&
+            (stamp.nFileSizeHigh || stamp.nFileSizeLow);
+    }
+};
+
+documentrename::Result savePresentationAs(IDispatch* document, const std::wstring& oldPath,
+        const std::wstring& newPath, PresentationFormat format) {
+    using documentrename::Result;
+    RenameFileHandle original{CreateFileW(oldPath.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+    BY_HANDLE_FILE_INFORMATION stamp{};
+    if (!fileStamp(original.value, stamp) || presentationFormat(oldPath) != format) return Result::failed;
+
+    PresentationSaveTarget target(newPath);
+    if (!target.reserved) return Result::failed;
+    constexpr long openXmlPresentation = 24;
+    constexpr long strictOpenXmlPresentation = 38;
+    call(document, L"SaveAs", DISPATCH_METHOD, {Var(newPath),
+        Var(format == PresentationFormat::strict ? strictOpenXmlPresentation : openXmlPresentation)});
+    if (storage::normalize(call(document, L"FullName").str()) != storage::normalize(newPath) ||
+        !call(document, L"Saved").boolean() || !target.containsSavedPresentation() ||
+        presentationFormat(newPath) != format) return Result::failed;
+
+    return removeSavedFile(oldPath, stamp) ? Result::renamed : Result::originalRetained;
 }
 
 bool moveSavedFile(const std::wstring& oldPath, const std::wstring& newPath,
@@ -609,8 +730,7 @@ documentrename::Result Session::renameFile(unsigned long long id, const std::wst
     const auto newPath = documentrename::target(oldPath, name);
     if (newPath == oldPath) return Result::renamed;
     if (storage::normalize(newPath) == storage::normalize(oldPath)) return Result::failed;
-    if (GetFileAttributesW(newPath.c_str()) != INVALID_FILE_ATTRIBUTES ||
-        GetLastError() != ERROR_FILE_NOT_FOUND) return Result::failed;
+    if (!availableName(newPath)) return Result::failed;
 
     const auto position = std::distance(views.begin(), std::find(views.begin(), views.end(), view));
     std::wstring reopenedPath;
@@ -623,60 +743,63 @@ documentrename::Result Session::renameFile(unsigned long long id, const std::wst
             call(document.get(), L"ReadOnly").boolean()) return Result::failed;
         auto windows = call(document.get(), L"Windows").disp();
         if (call(windows.get(), L"Count").number() != 1) return Result::failed;
-        const bool pptx = host == Host::PowerPoint && _wcsicmp(extension.c_str(), L".pptx") == 0;
+        const bool pptx = host == Host::PowerPoint && documentrename::isPptx(oldPath);
         const auto format = pptx ? presentationFormat(oldPath) : PresentationFormat::unknown;
         if (pptx && format == PresentationFormat::unknown) return Result::failed;
 
-        auto documents = call(app.get(), host == Host::Word ? L"Documents" :
-            host == Host::Excel ? L"Workbooks" : L"Presentations").disp();
         call(view->window.get(), L"Activate", DISPATCH_METHOD);
         if (call(document.get(), L"FullName").str() != oldPath ||
             call(document.get(), L"ReadOnly").boolean() ||
             call(windows.get(), L"Count").number() != 1) return Result::failed;
-        // Save the live document in its current format and directory. Office
-        // never receives the requested destination as a path to write.
-        if (!call(document.get(), L"Saved").boolean()) call(document.get(), L"Save", DISPATCH_METHOD);
-        if (call(document.get(), L"FullName").str() != oldPath ||
-            !call(document.get(), L"Saved").boolean() ||
-            call(windows.get(), L"Count").number() != 1) return Result::failed;
+        if (pptx) {
+            result = savePresentationAs(document.get(), oldPath, newPath, format);
+        } else if (host != Host::PowerPoint) {
+            result = saveDocumentUsingDialog(host, app.get(), document.get(), oldPath, newPath);
+        } else {
+            auto documents = call(app.get(), L"Presentations").disp();
+            // Save the live document in its current format and directory. Office
+            // never receives the requested destination as a path to write.
+            if (!call(document.get(), L"Saved").boolean()) call(document.get(), L"Save", DISPATCH_METHOD);
+            if (call(document.get(), L"FullName").str() != oldPath ||
+                !call(document.get(), L"Saved").boolean() ||
+                call(windows.get(), L"Count").number() != 1) return Result::failed;
 
-        RenameFileHandle saved{CreateFileW(oldPath.c_str(), FILE_READ_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-            FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
-        BY_HANDLE_FILE_INFORMATION stamp{};
-        if (!fileStamp(saved.value, stamp) || (pptx && presentationFormat(oldPath) != format)) return Result::failed;
+            RenameFileHandle saved{CreateFileW(oldPath.c_str(), FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+            BY_HANDLE_FILE_INFORMATION stamp{};
+            if (!fileStamp(saved.value, stamp)) return Result::failed;
 
-        const HWND root = GetAncestor(view->hwnd, GA_ROOT);
-        if (root && root == GetForegroundWindow() && !transition.begin(root, module)) return Result::failed;
+            const HWND root = GetAncestor(view->hwnd, GA_ROOT);
+            if (root && root == GetForegroundWindow() && !transition.begin(root, module)) return Result::failed;
 
-        if (host == Host::Word) call(document.get(), L"Close", DISPATCH_METHOD, {Var(0L)});
-        else if (host == Host::Excel) call(document.get(), L"Close", DISPATCH_METHOD, {Var(false)});
-        else call(document.get(), L"Close", DISPATCH_METHOD);
-        const auto oldKey = storage::normalize(oldPath);
-        const auto count = call(documents.get(), L"Count").number();
-        for (long i = 1; i <= count; ++i) {
-            auto openDocument = item(documents.get(), i);
-            if (storage::normalize(call(openDocument.get(), L"FullName").str()) == oldKey)
-                return Result::failed; // A BeforeClose handler can cancel without a COM error.
-        }
+            call(document.get(), L"Close", DISPATCH_METHOD);
+            const auto oldKey = storage::normalize(oldPath);
+            const auto count = call(documents.get(), L"Count").number();
+            for (long i = 1; i <= count; ++i) {
+                auto openDocument = item(documents.get(), i);
+                if (storage::normalize(call(openDocument.get(), L"FullName").str()) == oldKey)
+                    return Result::failed; // A BeforeClose handler can cancel without a COM error.
+            }
 
-        const bool moved = moveSavedFile(oldPath, newPath, stamp);
-        const auto& path = moved ? newPath : oldPath;
-        if (moved) {
-            result = Result::reopenFailed;
-            view->path = newPath;
-            persistView(*view);
-        }
-        // Reopen only the file we saved. A different file could have replaced
-        // the original while Office released its handles.
-        RenameFileHandle reopenFile{CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-            FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
-        if (sameSavedFile(reopenFile.value, stamp)) {
-            auto reopened = call(documents.get(), L"Open", DISPATCH_METHOD, {Var(path)}).disp();
-            if (reopened && storage::normalize(call(reopened.get(), L"FullName").str()) == storage::normalize(path)) {
-                reopenedPath = path;
-                if (moved) result = Result::renamed;
+            const bool moved = moveSavedFile(oldPath, newPath, stamp);
+            const auto& path = moved ? newPath : oldPath;
+            if (moved) {
+                result = Result::reopenFailed;
+                view->path = newPath;
+                persistView(*view);
+            }
+            // Reopen only the file we saved. A different file could have replaced
+            // the original while Office released its handles.
+            RenameFileHandle reopenFile{CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+            if (sameSavedFile(reopenFile.value, stamp)) {
+                auto reopened = call(documents.get(), L"Open", DISPATCH_METHOD, {Var(path)}).disp();
+                if (reopened && storage::normalize(call(reopened.get(), L"FullName").str()) == storage::normalize(path)) {
+                    reopenedPath = path;
+                    if (moved) result = Result::renamed;
+                }
             }
         }
     } catch (const ComError& error) {

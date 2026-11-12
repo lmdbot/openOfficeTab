@@ -120,8 +120,10 @@ See [English implementation and VM acceptance notes](office-x86.en.md) / [32 位
 
 ## 标签页右键重命名
 
-右键菜单 `Session::menu` 在保存命令旁提供“重命名文件…”。`features.cpp` 调用 `rename-dialog.h` 的原生模态对话框，输入的是不含扩展名的名称。`Session::renameFile` 在宿主 STA 中按原格式保存编辑并关闭文档，通过 Windows 文件句柄在原目录内原子改名，然后重新打开。重新打开会重置 Office 撤销历史，刷新时恢复标签偏好和位置。
+右键菜单 `Session::menu` 在保存命令旁提供“重命名文件…”。`features.cpp` 调用 `rename-dialog.h` 的原生模态对话框，输入的是不含扩展名的名称。Word 和 Excel 的 `Session::renameFile` 预填 Office 原生“另存为”的路径和原格式，保存后同一个文档继续编辑。插件确认路径和格式后才清理旧文件；旧文件被替换或无法安全删除时保留并提示。
 
-仅已保存、可写的单窗口本地或 UNC 文档可用。拒绝非法文件名、仅大小写变化及无法可靠识别格式的 PowerPoint `.pptx`。原子改名禁止覆盖目标，目标在保存或关闭期间出现时保留两份文件。`RenameTransition` 在文档窗口处于前台时暂时显示关闭前的画面，等重开后的窗口重绘再移除。Office 模态提示激活时会撤下覆盖层。
+仅已保存、可写的单窗口本地或 UNC 文档可用。拒绝非法文件名、仅大小写变化及无法可靠识别格式的 PowerPoint `.pptx`。Word 和 Excel 在原生对话框出现之前拒绝已存在的目标，之后由 Office 提供替换确认；这两种宿主没有独立的原子禁止覆盖保证。其他 PowerPoint 格式仍通过 Windows 文件句柄原子改名后重开。`RenameTransition` 在文档窗口处于前台时暂时显示关闭前的画面，等重开后的窗口重绘再移除。Office 模态提示激活时会撤下覆盖层。
+
+PowerPoint 的普通与 Strict `.pptx` 使用 `SaveAs` 保持演示文稿打开。插件通过 `CREATE_NEW` 预留目标并持有禁止删除共享的句柄，核对新文件的身份、格式和保存状态后，才按原文件的身份和保存时间清理旧路径。
 
 `tests/rename-test.cpp` 检查文件名规则和扩展名保留。`tests/rename-session-test.cpp` 使用模拟 Office COM、真实 Win32 文件和 OPC 包，覆盖格式识别、保存或关闭取消、同名冲突、原路径被替换、重开失败和偏好继承。双架构测试入口及实机验收清单见 [重命名验证](rename-validation.md)。

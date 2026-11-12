@@ -34,7 +34,12 @@ inline INT_PTR CALLBACK renameProc(HWND dialog,UINT message,WPARAM wp,LPARAM lp)
         auto edit=control(L"EDIT",documentrename::stem(choice->path).c_str(),WS_TABSTOP|ES_AUTOHSCROLL,101);
         SendMessageW(edit,EM_SETLIMITTEXT,255,0);SetWindowSubclass(edit,dialogui::controlProc,1,0);
         control(L"STATIC",documentrename::extension(choice->path).c_str(),SS_RIGHT|SS_ENDELLIPSIS|SS_NOPREFIX,113);
-        control(L"STATIC",i18n::text(choice->language,L"保存当前编辑，再关闭文档并用新名称重新打开。Office 撤销历史将重置。"),SS_NOPREFIX,114);
+        const auto host = choice->session ? choice->session->host : Host::Word;
+        const auto hint = host != Host::PowerPoint ?
+            L"将在 Office 中确认另存为，当前文档会保持打开。" :
+            documentrename::isPptx(choice->path) ? L"以新名称保存当前编辑，演示文稿会保持打开。" :
+            L"保存当前编辑，再关闭文档并用新名称重新打开。Office 撤销历史将重置。";
+        control(L"STATIC",i18n::text(choice->language,hint),SS_NOPREFIX,114);
         for(int id:{IDCANCEL,IDOK}){auto button=control(L"BUTTON",i18n::text(choice->language,id==IDOK?L"重命名":L"取消"),WS_TABSTOP|BS_OWNERDRAW,id);SetWindowSubclass(button,dialogui::controlProc,1,0);}
         layout(dialog,*choice);
         choice->theme.center(dialog, 480, 288);
